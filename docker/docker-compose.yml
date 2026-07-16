@@ -1,0 +1,90 @@
+# Local containerised stack: 3 backends, the load balancer, Prometheus, Grafana.
+#
+# Run from the repository root:
+#   docker compose -f docker/docker-compose.yml up --build
+#
+# Then:
+#   Grafana     http://localhost:3000  (admin/admin, dashboard auto-provisioned)
+#   Prometheus  http://localhost:9090
+#   LB metrics  http://localhost:9100/metrics
+#   Traffic     docker compose -f docker/docker-compose.yml run --rm client \
+#                 --target=lb:50050 --requests=60
+#
+# NOT VERIFIED: Docker is not installed on the development machine. See README.
+
+name: grpc-load-balancer
+
+x-backend: &backend
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+    target: backend
+  networks: [lbnet]
+  restart: unless-stopped
+
+services:
+  backend-1:
+    <<: *backend
+    command: ["--port=50051", "--id=be-1"]
+  backend-2:
+    <<: *backend
+    command: ["--port=50051", "--id=be-2"]
+  backend-3:
+    <<: *backend
+    command: ["--port=50051", "--id=be-3"]
+
+  lb:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: lb
+    command:
+      - "--port=50050"
+      - "--metrics_port=9100"
+      # Compose service names resolve via Docker's embedded DNS. Each backend is
+      # a distinct service precisely so it gets its own stable name -- scaling
+      # one service to 3 replicas would give a single name round-robined by
+      # Docker's DNS, which is exactly the L4-style balancing this project
+      # exists to replace.
+      - "--backends=backend-1:50051,backend-2:50051,backend-3:50051"
+    ports:
+      - "50050:50050"
+      - "9100:9100"
+    depends_on: [backend-1, backend-2, backend-3]
+    networks: [lbnet]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks: [lbnet]
+    depends_on: [lb]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    networks: [lbnet]
+    depends_on: [prometheus]
+
+  # Not started by `up`; run on demand with `compose run --rm client`.
+  client:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: client
+    profiles: [tools]
+    networks: [lbnet]
+
+networks:
+  lbnet:

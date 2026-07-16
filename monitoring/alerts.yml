@@ -1,0 +1,79 @@
+# Alerting rules.
+#
+# Each rule targets a failure this system can actually have, and the `for`
+# clauses are set against the LB's real timings (health checks every ~300-400ms,
+# eviction after 1 failure) rather than copied defaults.
+
+groups:
+  - name: grpc-lb
+    rules:
+      - alert: NoHealthyBackends
+        expr: lb_healthy_backends == 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Load balancer has no backends in rotation"
+          description: >-
+            Every backend has failed active health checks. The LB is returning
+            UNAVAILABLE and reporting itself NOT_SERVING. This is total outage
+            for the echo service.
+
+      - alert: BackendPoolDegraded
+        expr: lb_healthy_backends < 2
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Fewer than 2 backends in rotation"
+          description: >-
+            The pool has lost redundancy. One more failure means an outage.
+
+      - alert: BackendFlapping
+        # Asymmetric thresholds (evict after 1 failure, re-admit after 2
+        # successes) are meant to damp oscillation. More than 6 transitions in
+        # 5 minutes means that damping is not holding and the thresholds --
+        # or the backend -- need attention.
+        expr: increase(lb_backend_transitions_total[5m]) > 6
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend {{ $labels.backend }} is flapping in and out of rotation"
+
+      - alert: HighRetryRate
+        # Retries mean requests are reaching backends that health checking has
+        # not yet evicted. A steady rate suggests the check interval is too
+        # slow for how fast backends are failing.
+        expr: >-
+          rate(lb_retries_total[2m])
+            / clamp_min(rate(lb_requests_total{result="ok"}[2m]), 0.001) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Over 5% of requests are being retried onto another backend"
+
+      - alert: RequestErrorRate
+        expr: >-
+          rate(lb_requests_total{result="failed"}[2m])
+            / clamp_min(rate(lb_requests_total[2m]), 0.001) > 0.01
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Over 1% of RPCs through the load balancer are failing"
+
+      - alert: HighLatencyP99
+        expr: >-
+          histogram_quantile(
+            0.99, sum(rate(lb_request_duration_seconds_bucket[2m])) by (le)
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p99 latency through the LB above 50ms"
+          description: >-
+            A same-host hop measures ~0.25ms; 50ms means backends are slow or
+            requests are being retried.

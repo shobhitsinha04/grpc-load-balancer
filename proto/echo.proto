@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package echo.v1;
+
+// A deliberately trivial application service. The point of this project is the
+// load balancer in front of it, not the work it does. Echo keeps the demo
+// legible: whatever you send comes back, stamped with which replica served it.
+service EchoService {
+  rpc Echo(EchoRequest) returns (EchoResponse);
+}
+
+message EchoRequest {
+  string message = 1;
+}
+
+message EchoResponse {
+  string message = 1;
+
+  // Identity of the backend replica that actually handled this RPC. The load
+  // balancer passes this through untouched, so a client tallying `served_by`
+  // across N calls observes the balancing policy directly. This is what makes
+  // round-robin an assertion rather than a claim.
+  string served_by = 2;
+
+  // Per-backend count of RPCs served, for spotting skew in the demo output.
+  uint64 backend_request_count = 3;
+}

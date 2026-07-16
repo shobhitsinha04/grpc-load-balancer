@@ -1,0 +1,30 @@
+# Prometheus scrape config, prometheus-operator flavour.
+#
+# Apply this ONLY if the cluster runs prometheus-operator (which GKE's managed
+# Prometheus and most kube-prometheus-stack installs do). It requires the
+# monitoring.coreos.com CRDs; without them `kubectl apply` fails with
+# "no matches for kind ServiceMonitor", which is expected, not a bug.
+#
+# The pod annotations in 20-lb.yaml cover the other common setup, where a
+# self-managed Prometheus discovers targets by annotation. The two are
+# alternatives -- running both just scrapes the same endpoint twice.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: grpc-lb
+  namespace: grpc-lb
+  labels:
+    app: grpc-lb
+    release: kube-prometheus-stack  # Must match the operator's serviceMonitorSelector.
+spec:
+  namespaceSelector:
+    matchNames: ["grpc-lb"]
+  selector:
+    matchLabels:
+      app: grpc-lb
+  endpoints:
+    - port: metrics       # Named port from the grpc-lb Service.
+      path: /metrics
+      interval: 5s        # Health flips resolve in well under a second; a
+                          # 30s default would miss an entire eviction/recovery
+                          # cycle between samples.

@@ -1,0 +1,58 @@
+// The standard gRPC health checking protocol.
+//
+// Vendored from the gRPC project (grpc/src/proto/grpc/health/v1/health.proto),
+// Copyright 2015 gRPC authors, licensed under Apache License 2.0.
+//
+// WHY THIS FILE IS COPIED IN, rather than pulled from the installed gRPC:
+// gRPC's C++ distribution ships the *server* side of health checking as a
+// prebuilt implementation (grpcpp/health_check_service_interface.h) that is
+// hand-coded against the wire format -- it contains no generated protobuf
+// classes and does not install this .proto. That is fine for a server, which
+// only needs to answer. Our load balancer is a health check *client*: it must
+// call grpc.health.v1.Health/Check on each backend, so it needs a generated
+// stub, so it needs this file.
+//
+// The package, service name, message shapes and field numbers below are
+// reproduced verbatim. The wire identity of an RPC is derived from them
+// ("/grpc.health.v1.Health/Check"), so changing anything here would silently
+// stop us from speaking the standard protocol and turn this into a bespoke
+// ping that only talks to itself. Do not "tidy" this file.
+//
+// Verified safe to generate: the installed libgrpc++ registers no descriptor
+// for grpc/health/v1/health.proto and exports no grpc::health::v1 symbols, so
+// our generated code cannot collide with it in the protobuf descriptor pool.
+
+syntax = "proto3";
+
+package grpc.health.v1;
+
+message HealthCheckRequest {
+  // Empty string means "the server as a whole" rather than one named service.
+  // That is the convention gRPC's default health service registers under, and
+  // it is what the load balancer sends.
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+    SERVICE_UNKNOWN = 3;  // Used only by the Watch method.
+  }
+  ServingStatus status = 1;
+}
+
+service Health {
+  // Unary check. This is what our load balancer's health thread calls.
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Streaming health updates. Declared to keep this file a faithful copy of the
+  // standard; our load balancer deliberately polls Check instead. Polling is
+  // stateless, and a failed poll is itself the signal that a backend is
+  // unreachable -- whereas a broken Watch stream needs re-establishment logic
+  // that has to tell "the stream died" apart from "the backend died". Watch is
+  // the better answer at scale: it removes the detection gap and the poll
+  // traffic together.
+  rpc Watch(HealthCheckRequest) returns (stream HealthCheckResponse);
+}

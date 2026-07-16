@@ -1,0 +1,22 @@
+# cp terraform.tfvars.example terraform.tfvars, then fill in project_id.
+# terraform.tfvars is gitignored -- it names a real billable project.
+
+project_id   = "your-gcp-project-id"
+region       = "us-central1"
+cluster_name = "grpc-lb-cluster"
+
+# 1 node per zone x 3 zones (regional cluster) = 3 nodes.
+node_count   = 1
+machine_type = "e2-standard-2"
+
+# Spot nodes are ~60-90% cheaper and can be reclaimed at 30 seconds' notice.
+preemptible_nodes = true
+
+# kubectl reaches the control plane only from CIDRs listed here. Add your own
+# address; never 0.0.0.0/0.
+# authorized_networks = [
+#   {
+#     cidr_block   = "203.0.113.4/32"
+#     display_name = "my-laptop"
+#   },
+# ]

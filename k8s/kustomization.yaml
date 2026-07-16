@@ -1,0 +1,19 @@
+# kubectl apply -k k8s/
+#
+# 30-servicemonitor.yaml is deliberately NOT in this list: it needs the
+# prometheus-operator CRDs, and including it would make `apply -k` fail on a
+# cluster without them. Apply it separately if the operator is installed:
+#   kubectl apply -f k8s/30-servicemonitor.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - 00-namespace.yaml
+  - 10-backend.yaml
+  - 20-lb.yaml
+
+images:
+  - name: ghcr.io/shobhitsinha04/grpc-lb
+    newTag: dev
+  - name: ghcr.io/shobhitsinha04/grpc-lb-backend
+    newTag: dev

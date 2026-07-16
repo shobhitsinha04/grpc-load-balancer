@@ -1,0 +1,15 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    # Fixed uid so the provisioned dashboard can reference the datasource
+    # statically. Without it Grafana assigns a random uid at startup and every
+    # panel in the dashboard renders "Datasource not found".
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s  # Matches scrape_interval in monitoring/prometheus.yml.

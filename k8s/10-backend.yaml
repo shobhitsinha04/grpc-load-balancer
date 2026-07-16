@@ -1,0 +1,103 @@
+# Echo backend replicas.
+#
+# WHY A STATEFULSET FOR A STATELESS SERVICE:
+# The load balancer takes an explicit --backends list. A Deployment gives pods
+# random names and churning IPs, so there would be nothing stable to put in
+# that list. A StatefulSet behind a headless Service gives each pod a stable
+# DNS name -- echo-backend-0.echo-backend, -1, -2 -- that survives restart and
+# reschedule, which is exactly the identity the LB's static config needs.
+#
+# The honest alternative for production is to teach the LB to watch the
+# EndpointSlice API and reconfigure its pool live, at which point a plain
+# Deployment is correct and replicas can scale freely. That is the real fix;
+# this is the correct way to deploy what actually exists today.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-backend
+  namespace: grpc-lb
+  labels:
+    app: echo-backend
+spec:
+  # Headless: no cluster IP, no kube-proxy L4 balancing in front of the pods.
+  # DNS resolves straight to individual pod addresses, which is the point --
+  # kube-proxy would pin a whole HTTP/2 connection to one pod and defeat the
+  # per-RPC balancing this project is about.
+  clusterIP: None
+  selector:
+    app: echo-backend
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: echo-backend
+  namespace: grpc-lb
+  labels:
+    app: echo-backend
+spec:
+  serviceName: echo-backend
+  replicas: 3
+  podManagementPolicy: Parallel  # These are independent; no ordering needed.
+  selector:
+    matchLabels:
+      app: echo-backend
+  template:
+    metadata:
+      labels:
+        app: echo-backend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend
+          image: ghcr.io/shobhitsinha04/grpc-lb-backend:dev
+          args:
+            - "--port=50051"
+            - "--id=$(POD_NAME)"
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: grpc
+              containerPort: 50051
+          # Readiness uses the standard gRPC health protocol -- the same
+          # grpc.health.v1.Health/Check the load balancer calls. Kubernetes
+          # speaks it natively (GA in 1.27; beta and gated in 1.24-1.26).
+          # A pod reporting NOT_SERVING drops out of the Service's endpoints.
+          readinessProbe:
+            grpc:
+              port: 50051
+            periodSeconds: 2
+            failureThreshold: 1
+          # Liveness deliberately does NOT reuse the health check. NOT_SERVING
+          # is a legitimate operational state ("I am up but cannot serve right
+          # now"), and restarting a pod for saying so destroys the very signal
+          # the balancer relies on. Liveness answers a different question: is
+          # the process wedged? A TCP accept proves it is not.
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

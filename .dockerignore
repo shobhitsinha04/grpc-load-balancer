@@ -1,0 +1,17 @@
+# The build stage runs cmake inside the image; a host build tree copied in would
+# carry macOS object files and absolute paths from this laptop into a Debian
+# image and poison the cache.
+build/
+.demo-run/
+
+.git/
+.gitignore
+.DS_Store
+*.log
+
+docs/
+k8s/
+terraform/
+monitoring/
+scripts/
+README.md

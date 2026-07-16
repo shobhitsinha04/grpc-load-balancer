@@ -1,0 +1,101 @@
+# The L7 load balancer.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grpc-lb
+  namespace: grpc-lb
+  labels:
+    app: grpc-lb
+spec:
+  type: ClusterIP
+  selector:
+    app: grpc-lb
+  ports:
+    - name: grpc
+      port: 50050
+      targetPort: grpc
+    - name: metrics
+      port: 9100
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grpc-lb
+  namespace: grpc-lb
+  labels:
+    app: grpc-lb
+spec:
+  # A Deployment is right here: nothing addresses an individual LB pod by name.
+  # Contrast the backends, which the LB must name explicitly (see 10-backend).
+  replicas: 2
+  selector:
+    matchLabels:
+      app: grpc-lb
+  template:
+    metadata:
+      labels:
+        app: grpc-lb
+      annotations:
+        # Consumed by a Prometheus configured with the kubernetes_sd_configs
+        # pod-annotation convention (see monitoring/prometheus.yml). If the
+        # cluster runs prometheus-operator instead, 30-servicemonitor.yaml is
+        # the mechanism and these annotations are inert.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: lb
+          image: ghcr.io/shobhitsinha04/grpc-lb:dev
+          args:
+            - "--port=50050"
+            - "--metrics_port=9100"
+            # Stable per-pod DNS from the headless Service in 10-backend.yaml.
+            # Same-namespace short names; fully qualified would be
+            # echo-backend-0.echo-backend.grpc-lb.svc.cluster.local.
+            - "--backends=echo-backend-0.echo-backend:50051,echo-backend-1.echo-backend:50051,echo-backend-2.echo-backend:50051"
+            - "--health_interval_ms=300"
+            - "--health_timeout_ms=200"
+            - "--unhealthy_threshold=1"
+            - "--healthy_threshold=2"
+            - "--health_jitter_ms=100"
+            - "--timeout_ms=500"
+            - "--max_attempts=3"
+          ports:
+            - name: grpc
+              containerPort: 50050
+            - name: metrics
+              containerPort: 9100
+          # The LB reports NOT_SERVING while its pool is empty, so this keeps a
+          # balancer with no reachable backends out of the Service's endpoints
+          # rather than letting it accept traffic only to answer UNAVAILABLE.
+          readinessProbe:
+            grpc:
+              port: 50050
+            periodSeconds: 2
+            failureThreshold: 1
+          # Same reasoning as the backend: an empty pool is a legitimate state
+          # (every backend is down), and restarting the LB would not fix it.
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

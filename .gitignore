@@ -1,0 +1,16 @@
+build/
+.demo-run/
+.DS_Store
+*.log
+/tmp/
+
+# Local notes.
+docs/
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+crash.log
