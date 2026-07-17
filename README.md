@@ -20,22 +20,54 @@ Being precise about this, because "I built a load balancer" means little without
 
 So: **the load balancer is real and demonstrable. The deployment layer is reviewable configuration, not a running system.** If you want to see it work, run the demo below — it needs nothing but a compiler.
 
-## The demo
+## Running it
+
+### Prerequisites
+
+C++17, CMake ≥ 3.16, and gRPC + protobuf discoverable via `pkg-config`. Developed against Homebrew gRPC 1.82.1 / protoc 35.1 on macOS arm64; the Docker build uses Debian's gRPC 1.51.
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j8
+brew install grpc protobuf cmake      # macOS
+```
+
+Verify the toolchain before building — this catches most setup problems up front:
+
+```bash
+pkg-config --modversion grpc++        # expect 1.5x+
+which protoc grpc_cpp_plugin          # both must resolve
+c++ -std=c++17 -E -x c++ /dev/null    # must not error; a broken libc++ fails here
+```
+
+### Build
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j8
+```
+
+Produces three binaries in `build/`:
+
+| Binary | Role |
+|---|---|
+| `lb_server` | The load balancer. Listens on **:50050**, metrics on **:9100**. |
+| `backend_server` | An echo replica. You run several, on different ports. |
+| `load_client` | Traffic generator. Sends N requests and tallies who answered. |
+
+---
+
+### Option A — the scripted demo *(start here)*
+
+```bash
 ./scripts/demo.sh
 ```
 
-Five acts, roughly 20 seconds:
+Starts everything, runs five scenarios, tears down after itself. Roughly 20 seconds, no arguments, nothing to clean up.
 
 1. **Round-robin** — 30 RPCs across 3 healthy backends → 10/10/10
 2. **Backend reports `NOT_SERVING`** *(process stays alive)* → evicted → 15/15
 3. **Backend recovers** → re-admitted → 10/10/10
 4. **Backend `SIGKILL`ed** → evicted → 15/15
 5. **Backend restarted** → re-admitted → 10/10/10
-
-Sample output:
 
 ```
   30 RPCs -> 3 healthy backends
@@ -49,33 +81,115 @@ Sample output:
 
 **Act 2 is the point of the whole project.** That backend is still running and still accepting TCP connections — it is only *answering* that it cannot serve. An L4 balancer sees a healthy socket and keeps routing to it. This one asks over gRPC, hears the answer, and evicts it.
 
-### Driving it by hand
+The demo needs ports 50050, 9100 and 50051–50053. If something already holds them it says so and names the process, rather than failing obscurely.
 
-Four terminals:
+---
+
+### Option B — drive it yourself
+
+**Four terminals.** Each command runs in the foreground and stays running — that's expected. Ctrl-C to stop.
 
 ```bash
+# Terminal 1
 ./build/backend_server --port=50051 --id=be-A
+
+# Terminal 2
 ./build/backend_server --port=50052 --id=be-B
+
+# Terminal 3
 ./build/backend_server --port=50053 --id=be-C
+
+# Terminal 4 — the load balancer
 ./build/lb_server --backends=127.0.0.1:50051,127.0.0.1:50052,127.0.0.1:50053
 ```
 
-Then:
+Terminal 4 should show all three entering rotation before you send traffic:
 
-```bash
-./build/load_client --requests=30            # expect an even split
-
-# Make one backend report NOT_SERVING without killing it:
-kill -USR1 $(lsof -ti:50052 -sTCP:LISTEN)    # note the -sTCP:LISTEN
-./build/load_client --requests=30            # expect 15/15, process still alive
-kill -USR2 $(lsof -ti:50052 -sTCP:LISTEN)    # recover
-
-kill -9 $(lsof -ti:50053 -sTCP:LISTEN)       # hard kill -> evicted
-
-curl -s localhost:9100/metrics | grep lb_backend_healthy
+```
+[lb] health: be-50051 (127.0.0.1:50051) -> HEALTHY, added to rotation
+[lb] health: be-50052 (127.0.0.1:50052) -> HEALTHY, added to rotation
+[lb] health: be-50053 (127.0.0.1:50053) -> HEALTHY, added to rotation
+[lb] self-health -> SERVING (3 healthy backends)
 ```
 
-**`-sTCP:LISTEN` is not optional.** Plain `lsof -ti:50052` returns every process *touching* that port — which includes the load balancer, since it holds an established connection to each backend. Without the filter, `kill -USR1` fans out to the LB too. The LB now ignores those signals, but the filter is still what you mean: address the process *listening* on the port, not everyone talking to it. `scripts/demo.sh` sidesteps this entirely by tracking pids in files.
+Backends start **unhealthy** and must pass two consecutive health checks before receiving traffic, so this takes about a second. That's deliberate: a backend proves it can serve before anything is routed to it.
+
+**Now, in a fifth terminal, experiment:**
+
+```bash
+# Baseline — expect an even split
+./build/load_client --requests=30
+```
+
+```bash
+# The interesting one: make a backend report NOT_SERVING WITHOUT killing it.
+kill -USR1 $(lsof -ti:50052 -sTCP:LISTEN)
+./build/load_client --requests=30      # → 15/15 across be-A and be-C
+
+# Watch terminal 2: the process is still running. It just says it can't serve.
+kill -USR2 $(lsof -ti:50052 -sTCP:LISTEN)
+./build/load_client --requests=30      # → back to 10/10/10
+```
+
+```bash
+# Hard kill — no graceful shutdown, the health check just stops getting answers
+kill -9 $(lsof -ti:50053 -sTCP:LISTEN)
+./build/load_client --requests=30      # → 15/15, still zero failures
+```
+
+> ### ⚠️ `-sTCP:LISTEN` is not optional
+>
+> Plain `lsof -ti:50052` returns **every process touching that port** — which includes the **load balancer**, because it holds a persistent connection to every backend for health checks and traffic.
+>
+> So `kill -USR1 $(lsof -ti:50052)` signals the LB too. The LB ignores those signals now, but before that fix it died instantly — and the symptom was a client that couldn't reach the *balancer*, which looks nothing like "I signalled a backend."
+>
+> `-sTCP:LISTEN` filters to the process **listening** on the port. That's the backend, and it's what you meant.
+>
+> `scripts/demo.sh` avoids this entirely by tracking pids in files.
+
+### Watching what the balancer thinks
+
+```bash
+# Who is in rotation right now?
+curl -s localhost:9100/metrics | grep lb_backend_healthy
+
+# Distribution — this is round-robin, observable
+curl -s localhost:9100/metrics | grep lb_backend_rpcs_total
+
+# Live view, refreshing every second (macOS has no `watch` by default)
+while sleep 1; do clear; curl -s localhost:9100/metrics \
+  | grep -E '^lb_healthy_backends|^lb_backend_healthy|^lb_requests_total|^lb_retries_total'; done
+```
+
+Leave that running in a spare terminal while you kill and revive backends — `lb_backend_healthy` flips 1 → 0 → 1 in real time as the health checker evicts and re-admits.
+
+### Proving the retry layer
+
+Health checking has a detection gap: a backend can die *between* checks. Widen it to 8 seconds and you can watch retry cover for it:
+
+```bash
+# Terminal 4 — restart the LB with slow health checks
+./build/lb_server --backends=127.0.0.1:50051,127.0.0.1:50052,127.0.0.1:50053 \
+  --health_interval_ms=8000 --healthy_threshold=1
+
+# Then immediately:
+kill -9 $(lsof -ti:50052 -sTCP:LISTEN)
+./build/load_client --requests=30
+curl -s localhost:9100/metrics | grep -E '^lb_healthy_backends|^lb_retries_total'
+```
+
+You'll see `lb_healthy_backends 3` — the balancer still **believes** the dead backend is fine — alongside `lb_retries_total 15` and **30/30 ok**. Round-robin routed 15 requests into a corpse and retry rescued every one, before health checking noticed anything.
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Connection refused ... 127.0.0.1:50050` | The **load balancer** isn't running (:50050 is the LB, not a backend) | Check terminal 4. Restart it. |
+| `ERROR: ports already in use` | A previous run or a manual session still holds them | Ctrl-C those terminals; the message names the pids |
+| `no healthy backend available` | No backend has passed a health check | Are the backends running? Check the LB log for eviction lines |
+| Killing a backend also kills the LB | `lsof -ti:PORT` without `-sTCP:LISTEN` | Add the filter (see the warning above) |
+| Code changes have no effect | The running process is the **old binary** | Rebuild, then Ctrl-C and restart that process |
+| First run of a fresh binary is slow | macOS validates newly linked binaries | Wait for the `serving on` line; never assume a fixed sleep |
 
 ## Why L7
 
@@ -171,14 +285,6 @@ Stated plainly, because each is a reasonable interview question:
 - **Thread-per-backend doesn't scale to thousands.** Async completion queues would.
 - **Insecure channels only.** No TLS, no mTLS.
 - **The deployment layer is unproven** — see the table at the top.
-
-## Build requirements
-
-C++17, CMake ≥ 3.16, gRPC + protobuf with `pkg-config` (`grpc++`), and `grpc_cpp_plugin`. Developed against Homebrew gRPC 1.82.1 / protoc 35.1 on macOS arm64.
-
-```bash
-brew install grpc protobuf   # macOS
-```
 
 ## License
 
