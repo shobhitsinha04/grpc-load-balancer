@@ -1,0 +1,33 @@
+# Prometheus config for running natively, with no Docker.
+#
+# prometheus.yml (the sibling of this file) targets the docker-compose stack:
+# it scrapes the service name `lb:9100` and loads rules from the container path
+# /etc/prometheus/alerts.yml. Neither resolves on a host running the binaries
+# directly, which is how scripts/demo.sh and the README's manual path work.
+#
+# Run from the monitoring/ directory so the relative rule_files path resolves
+# (Prometheus resolves rule_files against the process working directory, not
+# against the config file's location):
+#
+#   cd monitoring
+#   prometheus --config.file=prometheus.local.yml --storage.tsdb.path=/tmp/lb-tsdb
+#
+# Then http://localhost:9090.
+
+global:
+  # The LB evicts a backend within ~500ms, so a 15s default would sample an
+  # eviction and its recovery into the same gap and show a flat line.
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: grpc-lb
+    metrics_path: /metrics
+    static_configs:
+      # The load balancer's default --metrics_port, running on this host.
+      - targets: ["localhost:9100"]
+        labels:
+          env: local-native

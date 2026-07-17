@@ -12,13 +12,28 @@ Being precise about this, because "I built a load balancer" means little without
 | Round-robin distribution | **Measured.** 30 requests → 10/10/10 across 3 backends, tallied client-side. |
 | Health-based eviction and recovery | **Measured.** Both a backend reporting `NOT_SERVING` and a `SIGKILL`ed backend. Zero failed requests during failover. |
 | Request-level retry | **Measured.** With health checks slowed to 8s, 15 requests hit a dead backend and all 15 were retried onto live ones; 30/30 still succeeded. |
-| Prometheus metrics | **Verified.** Endpoint scraped, format and content-type checked, every dashboard/alert metric confirmed to exist. |
+| Prometheus | **Verified end-to-end.** Real Prometheus 3.13 scrapes the LB (target `UP`), `promtool` accepts the config, all 6 alert rules load and evaluate, and it recorded a live eviction and recovery in the timeseries. |
+| Grafana dashboard | **Verified end-to-end.** Loaded into real Grafana 13.1. All 10 panels resolve the datasource and return live data through Grafana's own query proxy. |
 | Docker images | **Authored, never built.** Docker is not installed on the development machine. |
-| Kubernetes manifests | **Authored, never applied.** No cluster. YAML syntax validated; semantics reviewed, not executed. |
-| Terraform GKE module | **Authored, never applied.** `terraform plan` has not run. No GCP project was billed. |
-| Grafana dashboard | **Authored, JSON validated, never rendered.** Queries are written against metrics confirmed to exist. |
+| Kubernetes manifests | **Authored, never applied.** No cluster. YAML syntax validated; not checked against Kubernetes schemas. |
+| Terraform GKE module | **Authored, never applied.** `terraform validate` has not run. No GCP project was billed. |
 
-So: **the load balancer is real and demonstrable. The deployment layer is reviewable configuration, not a running system.** If you want to see it work, run the demo below — it needs nothing but a compiler.
+So: **the load balancer and its observability are real and demonstrable. The deployment layer — Docker, Kubernetes, Terraform — is reviewable configuration, not a running system.** Everything in the "verified" rows can be reproduced on any machine with a compiler; see below.
+
+Evidence for the monitoring rows, reproducible via [`scripts/monitoring.sh`](scripts/monitoring.sh):
+
+```
+target UP    prometheus is scraping the load balancer
+alert rules  6 loaded, health=ok
+dashboard    'gRPC L7 Load Balancer' uid=grpc-lb-overview, 10/10 panels resolve
+
+rate(lb_backend_rpcs_total{result="ok"}[5m])  ->  0.3396, 0.3396, 0.3396   (round-robin)
+histogram_quantile(0.99, ...)                 ->  0.00243918
+
+be-50052 health across a live failover:  1 1 1 1 1 1 0 1 1
+  eviction (1->0): YES     recovery (0->1): YES
+  requests ok: 779         failed: 0
+```
 
 ## Running it
 
@@ -180,6 +195,38 @@ curl -s localhost:9100/metrics | grep -E '^lb_healthy_backends|^lb_retries_total
 
 You'll see `lb_healthy_backends 3` — the balancer still **believes** the dead backend is fine — alongside `lb_retries_total 15` and **30/30 ok**. Round-robin routed 15 requests into a corpse and retry rescued every one, before health checking noticed anything.
 
+### Monitoring — Prometheus + Grafana, without Docker
+
+```bash
+brew install prometheus grafana
+
+# with the LB already running in another terminal:
+./scripts/monitoring.sh
+```
+
+Then **Grafana at http://localhost:3000** (admin/admin) → dashboard *"gRPC L7 Load Balancer"*, and **Prometheus at http://localhost:9090**.
+
+Drive it while watching the dashboard:
+
+```bash
+./build/load_client --requests=600 --delay_ms=50     # panels start moving
+kill -USR1 $(lsof -ti:50052 -sTCP:LISTEN)            # watch it drop out of rotation
+kill -USR2 $(lsof -ti:50052 -sTCP:LISTEN)            # watch it come back
+```
+
+The **Backend health state** panel shows the eviction as a red band; **RPCs routed per backend** shows the survivors absorbing its share; **Request outcomes** stays flat at zero failures throughout. That contrast — visible failover, invisible to clients — is the story worth screenshotting.
+
+Why a script rather than the committed configs directly: `monitoring/prometheus.yml` and `monitoring/grafana/provisioning/` target the docker-compose stack, so they use container paths (`/etc/prometheus/alerts.yml`, `/var/lib/grafana/dashboards`) and the compose hostname `lb:9100`. None of that resolves on a host running the binaries natively. The script generates Grafana's provisioning at run time with absolute host paths and points Prometheus at [`monitoring/prometheus.local.yml`](monitoring/prometheus.local.yml). **The dashboard JSON is not duplicated** — the script loads the same file the compose stack serves, which is what makes running it a real test of the committed artifact.
+
+You can also check the configs without running anything:
+
+```bash
+promtool check rules monitoring/alerts.yml            # 6 rules
+cd monitoring && promtool check config prometheus.local.yml
+```
+
+`promtool check config monitoring/prometheus.yml` **fails on purpose** — it points at `/etc/prometheus/alerts.yml`, which only exists inside the container. That's the compose config, and promtool can't see a Docker path from the host.
+
 ### Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -190,6 +237,8 @@ You'll see `lb_healthy_backends 3` — the balancer still **believes** the dead 
 | Killing a backend also kills the LB | `lsof -ti:PORT` without `-sTCP:LISTEN` | Add the filter (see the warning above) |
 | Code changes have no effect | The running process is the **old binary** | Rebuild, then Ctrl-C and restart that process |
 | First run of a fresh binary is slow | macOS validates newly linked binaries | Wait for the `serving on` line; never assume a fixed sleep |
+| `monitoring.sh`: nothing serving metrics on :9100 | The LB isn't running | Start `lb_server` first; the script scrapes it, it doesn't start it |
+| Grafana panels say "Datasource not found" | Datasource `uid` isn't `prometheus` | The dashboard references that uid explicitly; don't rename it |
 
 ## Why L7
 

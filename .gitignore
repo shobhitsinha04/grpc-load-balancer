@@ -14,3 +14,4 @@ docs/
 *.tfstate.*
 terraform.tfvars
 crash.log
+.monitoring-run/
