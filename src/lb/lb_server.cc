@@ -206,6 +206,18 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, OnSignal);
   std::signal(SIGTERM, OnSignal);
 
+  // The balancer has no use for SIGUSR1/SIGUSR2, but their default disposition
+  // is to terminate the process -- so a stray one kills the load balancer.
+  // That is not hypothetical: the backends use these signals to toggle health,
+  // and the obvious way to address a backend by port, `lsof -ti:50052`, also
+  // matches this process, because it holds an established connection to that
+  // backend. `kill -USR1 $(lsof -ti:50052)` then signals both, and the
+  // balancer dies while the backend does the right thing -- an outage that
+  // looks like a load balancer bug and is really a fan-out signal. Ignoring
+  // signals a daemon does not use is cheap; dying from one is not.
+  std::signal(SIGUSR1, SIG_IGN);
+  std::signal(SIGUSR2, SIG_IGN);
+
   lb::BackendPool pool(targets, opts);
   lb::Histogram latency;
   LbEchoService service(&pool, &latency, timeout_ms, max_attempts);

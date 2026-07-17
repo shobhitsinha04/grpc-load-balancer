@@ -49,6 +49,34 @@ Sample output:
 
 **Act 2 is the point of the whole project.** That backend is still running and still accepting TCP connections — it is only *answering* that it cannot serve. An L4 balancer sees a healthy socket and keeps routing to it. This one asks over gRPC, hears the answer, and evicts it.
 
+### Driving it by hand
+
+Four terminals:
+
+```bash
+./build/backend_server --port=50051 --id=be-A
+./build/backend_server --port=50052 --id=be-B
+./build/backend_server --port=50053 --id=be-C
+./build/lb_server --backends=127.0.0.1:50051,127.0.0.1:50052,127.0.0.1:50053
+```
+
+Then:
+
+```bash
+./build/load_client --requests=30            # expect an even split
+
+# Make one backend report NOT_SERVING without killing it:
+kill -USR1 $(lsof -ti:50052 -sTCP:LISTEN)    # note the -sTCP:LISTEN
+./build/load_client --requests=30            # expect 15/15, process still alive
+kill -USR2 $(lsof -ti:50052 -sTCP:LISTEN)    # recover
+
+kill -9 $(lsof -ti:50053 -sTCP:LISTEN)       # hard kill -> evicted
+
+curl -s localhost:9100/metrics | grep lb_backend_healthy
+```
+
+**`-sTCP:LISTEN` is not optional.** Plain `lsof -ti:50052` returns every process *touching* that port — which includes the load balancer, since it holds an established connection to each backend. Without the filter, `kill -USR1` fans out to the LB too. The LB now ignores those signals, but the filter is still what you mean: address the process *listening* on the port, not everyone talking to it. `scripts/demo.sh` sidesteps this entirely by tracking pids in files.
+
 ## Why L7
 
 gRPC runs over HTTP/2, which **multiplexes many RPCs over one long-lived TCP connection**. An L4 balancer chooses a backend *per connection*, so a client opens one connection, gets pinned to one backend, and every RPC it ever sends goes to that same backend. Balancing accomplishes nothing.

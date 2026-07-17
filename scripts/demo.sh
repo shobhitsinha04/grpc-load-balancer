@@ -91,9 +91,34 @@ if [ ! -x "$BUILD/lb_server" ]; then
 fi
 
 rm -rf "$RUN"; mkdir -p "$RUN"
+# Only reaps processes this script started (it launches them by absolute path).
+# A manual run from the README uses ./build/..., which deliberately does not
+# match -- this script has no business killing servers someone else is using.
 pkill -f "$BUILD/backend_server" 2>/dev/null
 pkill -f "$BUILD/lb_server" 2>/dev/null
 sleep 0.3
+
+# ...which means the ports can still be held by a manual run. Say so plainly:
+# without this check the readiness wait just times out, and a bind failure
+# looks identical to a slow machine.
+busy=""
+for p in $LB_PORT $METRICS_PORT $BACKEND_PORTS; do
+  lsof -ti:"$p" -sTCP:LISTEN >/dev/null 2>&1 && busy="$busy $p"
+done
+if [ -n "$busy" ]; then
+  echo >&2
+  echo "ERROR: ports already in use:$busy" >&2
+  echo >&2
+  for p in $busy; do
+    pid="$(lsof -ti:"$p" -sTCP:LISTEN 2>/dev/null | head -1)"
+    echo "  :$p  held by pid $pid  ($(ps -p "$pid" -o args= 2>/dev/null | cut -c1-60))" >&2
+  done
+  echo >&2
+  echo "This demo needs those ports. Stop the processes above (Ctrl-C in their" >&2
+  echo "terminals) and re-run. If they are a manual session from the README," >&2
+  echo "that is expected -- the two cannot run at the same time." >&2
+  exit 1
+fi
 
 act "SETUP: 3 backend replicas + 1 L7 load balancer"
 for p in $BACKEND_PORTS; do
