@@ -152,7 +152,7 @@ kill -9 $(lsof -ti:50053 -sTCP:LISTEN)
 ./build/load_client --requests=30      # → 15/15, still zero failures
 ```
 
-> ### ⚠️ `-sTCP:LISTEN` is not optional
+> ### `-sTCP:LISTEN` is not optional
 >
 > Plain `lsof -ti:50052` returns **every process touching that port** — which includes the **load balancer**, because it holds a persistent connection to every backend for health checks and traffic.
 >
